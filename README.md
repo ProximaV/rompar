@@ -45,6 +45,10 @@ To open an existing rompar grid project:
 
 ```rompar.py --load <GRIDFILE>```
 
+To specify a differnet number of threads:
+
+```rompar.py <IMAGE> <BITS PER GROUP> <ROWS PER GROUP> --threads <THREADS>```
+
 When the rompar python package is installed, `romparqt` should be used
 instead of `rompar.py`.
 
@@ -54,6 +58,12 @@ is still useful for seeing what Rompar can do:
 
 For more information, check the tutorial in the help menu, and the
 shortcuts on the various menu items inside of Rompar.
+
+New features have been added for modifying the grid:
+
+In Grid Edit Mode, there are now handles at the start and end of each line. These can be arbitrarily selected with Ctrl-Left Click individually, or as a group by drawing a selection box with Shift-Left Click. Once selected, you can drag the handles to skew the lines either by grabbing a selected handle and dragging, or by the arrow keys.
+
+There is now an undo/redo stack that can be accessed with Ctrl-Z and Ctrl-Y.
 
 Colors:
   * Green: detected as bright spot ("1")
