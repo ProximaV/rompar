@@ -52,7 +52,7 @@ setup(
         ],
     author='John McMasters',
     author_email='JohnDMcMaster@gmail.com',
-    url='https://github.com/SiliconAnalysis/rompar',
+    url='https://github.com/ProximaV/rompar',
     packages=[
         'rompar',
         'rompar.qtui',

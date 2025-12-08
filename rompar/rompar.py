@@ -157,6 +157,8 @@ class Rompar(object):
         self.img_data_cache = numpy.zeros(self.img_original.shape, numpy.uint8)
         
         self.history = History()
+        
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.threads)
 
         self.__process_target_image()
 
@@ -505,7 +507,10 @@ class Rompar(object):
             for x, y in zip(xs, ys):
                 cv.circle(img, (x, y), radius, color, thickness)
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.threads) as executor:
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.threads) as executor:
+        # Re-use executor to save thread creation time
+        if True: 
+            executor = self.executor
             futures = []
             
             # Process each color group
@@ -524,22 +529,21 @@ class Rompar(object):
                 # Chunking
                 # Adjust chunks based on count
                 n_chunks = self.config.threads
-                if n_points < 1000: n_chunks = 1
+                if n_points < 100000: n_chunks = 1
                 
                 chunk_size = (n_points + n_chunks - 1) // n_chunks
                 
-                for i in range(0, n_points, chunk_size):
-                    end = min(i + chunk_size, n_points)
-                    # We must convert to list or standard types if threading?
-                    # Passing numpy arrays is fine.
-                    # .tolist() needed for zip? zip works with arrays but slower?
-                    # .tolist() conversion takes time but iteration is faster.
-                    # Benchmark showed .tolist() + zip is best combo.
-                    
-                    sub_x = xs[i:end].tolist()
-                    sub_y = ys[i:end].tolist()
-                    
-                    futures.append(executor.submit(draw_subset, sub_x, sub_y, color, rad, thick, self.img_grid))
+                if n_chunks == 1:
+                     # Avoid threading overhead for single chunk
+                     draw_subset(xs.tolist(), ys.tolist(), color, rad, thick, self.img_grid)
+                else:
+                    for i in range(0, n_points, chunk_size):
+                        end = min(i + chunk_size, n_points)
+                        
+                        sub_x = xs[i:end].tolist()
+                        sub_y = ys[i:end].tolist()
+                        
+                        futures.append(executor.submit(draw_subset, sub_x, sub_y, color, rad, thick, self.img_grid))
             
             # Wait for all
             concurrent.futures.wait(futures)

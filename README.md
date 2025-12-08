@@ -4,7 +4,7 @@ Masked ROM optical data extraction tool.
 
 Latest version:
 
-  https://github.com/AdamLaurie/rompar
+  https://github.com/ProximaV/rompar
 
 Original version by Adam Laurie, but significant changes by John
 McMaster, Caitlin Morgan, and Jessy Exum.
@@ -17,7 +17,7 @@ can be added to rompar, and pull requests are welcome.
 
 ## Installing
 
-Ubuntu 16.04
+Ubuntu 
 
 ```
 sudo apt-get install python3-pyqt5
@@ -27,7 +27,7 @@ sudo pip3 install opencv-python
 Windows
 
 ```
-git clone https://github.com/AdamLaurie/rompar
+git clone https://github.com/ProximaV/rompar
 cd rompar
 virtualenv venv
 venv\Scripts\activate
@@ -67,6 +67,12 @@ Enjoy!
 Adam & Rompar contributors.
 
 ## Release history
+
+2.2.0
+  * Undo/Redo support
+  * Vertical/Horizontal line skewing (handle support)
+  * Performance improvements
+  * multi-threading
 
 2.1.0
   * Better command line error handling
