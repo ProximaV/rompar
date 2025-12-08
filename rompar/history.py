@@ -68,7 +68,12 @@ class MoveColumnCommand(Command):
              self.rompar._move_bit_column_internal(self.final_indices[0], -self.dx, self.relative, indices=self.final_indices, handle_type=self.handle_type)
 
     def description(self):
-        return f"Move Col {self.idx}" + ("+" if self.indices and len(self.indices)>1 else "")
+        desc = f"Move Col {self.idx}"
+        if self.handle_type and self.handle_type != 'both':
+            desc += f" ({self.handle_type})"
+        if self.indices and len(self.indices) > 1:
+            desc += "+"
+        return desc
 
 class MoveRowCommand(Command):
     def __init__(self, rompar, idx, dy, relative=True, indices=None, handle_type=None):
@@ -94,10 +99,12 @@ class MoveRowCommand(Command):
              self.rompar._move_bit_row_internal(self.final_indices[0], -self.dy, self.relative, indices=self.final_indices, handle_type=self.handle_type)
 
     def description(self):
-         return f"Move Row {self.idx}" + ("+" if self.indices and len(self.indices)>1 else "")
-
-    def description(self):
-        return f"Move Row {self.idx}"
+        desc = f"Move Row {self.idx}"
+        if self.handle_type and self.handle_type != 'both':
+            desc += f" ({self.handle_type})"
+        if self.indices and len(self.indices) > 1:
+            desc += "+"
+        return desc
 
 class ToggleBitCommand(Command):
     def __init__(self, rompar, bit_xy, old_val):
