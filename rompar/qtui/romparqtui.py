@@ -14,6 +14,8 @@ from .about import RomparAboutDialog
 from .findhexdialog import FindHexDialog
 
 # Parse the ui file once.
+from rompar.history import MoveColumnCommand, MoveRowCommand
+
 import sys, os.path
 from PyQt5 import uic
 thisdir = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +32,12 @@ class RomparUiQt(QtWidgets.QMainWindow):
         super(RomparUiQt, self).__init__()
         self.ui = RomparUi()
         self.ui.setupUi(self)
+        
+        self.drag_start_pos = None
+        self.drag_start_index = None
+        self.drag_axis = None
+        self.did_drag_select_add = False
+        self.drag_start_selection = None
 
         self.config = config
         self.grid_fn = pathlib.Path(grid_fn).expanduser().absolute() \
@@ -38,14 +46,9 @@ class RomparUiQt(QtWidgets.QMainWindow):
         grid_dir_path = None
 
         if self.grid_fn:
-            self.set_edit_mode(MODE_EDIT_DATA)
             print("loading", self.grid_fn)
             grid_json = json_load_exit_bad(str(self.grid_fn), "--load")
             grid_dir_path = self.grid_fn.parent
-        else:
-            self.set_edit_mode(MODE_EDIT_GRID)
-            self.ui.actionSave.setEnabled(False)
-            self.ui.actionBackupSave.setEnabled(False)
 
         self.romp = Rompar(config,
                            img_fn=img_fn, grid_json=grid_json,
@@ -63,6 +66,13 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.mode_selection.addAction(self.ui.actionGridEditMode)
         self.mode_selection.addAction(self.ui.actionDataEditMode)
         self.mode_selection.exclusive = True
+        
+        # Drag State
+        self.dragging_handle = False
+        self.last_mouse_pos = None
+        
+        # Install Event Filter for Dragging
+        self.ui.graphicsView.viewport().installEventFilter(self)
 
         # Make the Image BG selection exclusive.
         self.baseimage_selection = QtWidgets.QActionGroup(self)
@@ -108,8 +118,15 @@ class RomparUiQt(QtWidgets.QMainWindow):
                                  QtGui.QImage.Format_RGB888)
         self.pixmapitem.setPixmap(QtGui.QPixmap(self.qImg))
 
-    def display_image(self):
-        self.romp.render_image(img_display=self.img, rgb=True)
+        if self.grid_fn:
+             self.set_edit_mode(MODE_EDIT_DATA)
+        else:
+             self.set_edit_mode(MODE_EDIT_GRID)
+             self.ui.actionSave.setEnabled(False)
+             self.ui.actionBackupSave.setEnabled(False)
+
+    def display_image(self, viewport=None, fast=False):
+        self.romp.render_image(img_display=self.img, rgb=True, viewport=viewport, fast=fast)
         self.pixmapitem.setPixmap(QtGui.QPixmap(self.qImg))
 
     def showTempStatus(self, *msg):
@@ -172,10 +189,14 @@ class RomparUiQt(QtWidgets.QMainWindow):
             print("Changing edit mode to GRID")
             self.mode = MODE_EDIT_GRID
             self.ui.buttonToggleMode.setChecked(True)
+            self.romp.set_grid_mode(True)
         else:
             print("Changing edit mode to DATA")
             self.mode = MODE_EDIT_DATA
             self.ui.buttonToggleMode.setChecked(False)
+            self.romp.set_grid_mode(False)
+        self.romp.grid_dirty = True # Force redraw to update handles
+        self.display_image()
 
     ########################################
     # Slots for QActions from the UI       #
@@ -244,7 +265,26 @@ class RomparUiQt(QtWidgets.QMainWindow):
             self.showTempStatus('Exported data to', str(filepath))
 
     @QtCore.pyqtSlot()
+    def on_actionUndo_triggered(self):
+        if self.romp.history.undo():
+            self.romp.grid_dirty = True
+            self.display_image()
+            self.showTempStatus('Undid last action')
+        else:
+             self.showTempStatus('Nothing to Undo')
+
+    @QtCore.pyqtSlot()
+    def on_actionRedo_triggered(self):
+        if self.romp.history.redo():
+            self.romp.grid_dirty = True
+            self.display_image()
+            self.showTempStatus('Redid last action')
+        else:
+             self.showTempStatus('Nothing to Redo')
+
+    @QtCore.pyqtSlot()
     def on_actionRedrawGrid_triggered(self):
+        self.romp.grid_dirty = True
         self.romp.redraw_grid()
         self.display_image()
         self.showTempStatus('Grid Redrawn')
@@ -282,16 +322,24 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.ui.buttonToggleMode.setChecked(False)
 
     # Increment/Decrement values
+    def get_view_rect(self):
+        # Get visible area in scene coords
+        viewport_rect = self.ui.graphicsView.viewport().rect()
+        scene_rect = self.ui.graphicsView.mapToScene(viewport_rect).boundingRect()
+        return (scene_rect.x(), scene_rect.y(), scene_rect.width(), scene_rect.height())
+
     @QtCore.pyqtSlot()
     def on_actionRadiusIncrease_triggered(self):
         self.config.radius += 1
         self.showTempStatus('Radius %d' % self.config.radius)
+        self.romp.grid_dirty = True
         self.romp.read_data()
         self.display_image()
     @QtCore.pyqtSlot()
     def on_actionRadiusDecrease_triggered(self):
         self.config.radius = max(self.config.radius-1, 1)
         self.showTempStatus('Radius %d' % self.config.radius)
+        self.romp.grid_dirty = True
         self.romp.read_data()
         self.display_image()
 
@@ -474,10 +522,14 @@ class RomparUiQt(QtWidgets.QMainWindow):
             except IndexError as e:
                 print("No bit toggled")
         elif self.mode == MODE_EDIT_GRID: # Grid Edit Mode
-            do_autocenter = keymods & QtCore.Qt.ShiftModifier
-            self.romp.grid_add_vertical_line(img_xy, do_autocenter)
+            hit = self.romp.grid_hit_test(img_xy)
+            if hit:
+                 # Handled by eventFilter (Press/Release)
+                 pass
+            else:
+                 do_autocenter = keymods & QtCore.Qt.ShiftModifier
+                 self.romp.grid_add_vertical_line(img_xy, do_autocenter)
             self.display_image()
-
     @QtCore.pyqtSlot(QtCore.QPointF, int)
     def on_graphicsView_sceneRightClicked(self, qimg_xy, keymods):
         img_xy = ImgXY(int(qimg_xy.x()), int(qimg_xy.y()))
@@ -501,6 +553,142 @@ class RomparUiQt(QtWidgets.QMainWindow):
         except IndexError as e:
             self.showTempStatus("No bit group selected")
 
+    def eventFilter(self, source, event):
+        if source == self.ui.graphicsView.viewport():
+            if event.type() == QtCore.QEvent.MouseButtonPress:
+                if self.mode == MODE_EDIT_GRID and event.button() == QtCore.Qt.LeftButton:
+                    # Map to scene
+                    scene_pos = self.ui.graphicsView.mapToScene(event.pos())
+                    img_xy = ImgXY(int(scene_pos.x()), int(scene_pos.y()))
+                    
+                    hit = self.romp.grid_hit_test(img_xy)
+                    if hit:
+                        idx, handle, is_vert = hit
+                        self.dragging_handle = True
+                        self.last_mouse_pos = scene_pos
+                        self.drag_start_pos = scene_pos # Capture start position
+                        
+                        # Selection logic is also handled by signal, but setting it here ensures immediate drag response
+                        self.romp.selected_handle = handle
+                        is_ctrl = event.modifiers() & QtCore.Qt.ControlModifier
+                        self.did_drag_select_add = False
+                        
+                        if is_vert:
+                             self.drag_axis = 1
+                             if is_ctrl:
+                                  if idx not in self.romp.selected_indices_v:
+                                      self.romp.select_toggle_v(idx)
+                                      self.did_drag_select_add = True
+                             else:
+                                  if idx not in self.romp.selected_indices_v:
+                                      self.romp.selected_line_v = idx
+                                      self.romp.selected_line_h = None
+                             
+                             self.drag_start_selection = list(self.romp.selected_indices_v)
+                             self.drag_start_index = idx
+                        else:
+                             self.drag_axis = 0
+                             if is_ctrl:
+                                  if idx not in self.romp.selected_indices_h:
+                                      self.romp.select_toggle_h(idx)
+                                      self.did_drag_select_add = True
+                             else:
+                                  if idx not in self.romp.selected_indices_h:
+                                      self.romp.selected_line_v = None
+                                      self.romp.selected_line_h = idx
+                                      
+                             self.drag_start_selection = list(self.romp.selected_indices_h)
+                             self.drag_start_index = idx
+                             
+                        self.romp.grid_dirty = True
+                        self.display_image()
+            
+            elif event.type() == QtCore.QEvent.MouseMove:
+                if self.dragging_handle and self.last_mouse_pos:
+                    scene_pos = self.ui.graphicsView.mapToScene(event.pos())
+                    dx = int(scene_pos.x() - self.last_mouse_pos.x())
+                    dy = int(scene_pos.y() - self.last_mouse_pos.y())
+                    
+                    if dx != 0 or dy != 0:
+                        if self.romp.Edit_x >= 0:
+                            # Pass push_history=False to avoid flooding
+                            self.romp.move_bit_column(self.romp.Edit_x, dx, relative=True, push_history=False)
+                        elif self.romp.Edit_y >= 0:
+                            self.romp.move_bit_row(self.romp.Edit_y, dy, relative=True, push_history=False)
+                        
+                        self.last_mouse_pos = scene_pos
+                        self.display_image(fast=True)
+            
+            elif event.type() == QtCore.QEvent.MouseButtonRelease:
+                if self.dragging_handle:
+                    self.dragging_handle = False
+                    
+                    # calculate total delta
+                    current_scene_pos = self.ui.graphicsView.mapToScene(event.pos())
+                    # Use drag_start_pos if valid, else last_mouse_pos (fallback)
+                    start_pos = self.drag_start_pos if self.drag_start_pos else self.last_mouse_pos
+                    
+                    total_dx = int(current_scene_pos.x() - start_pos.x())
+                    total_dy = int(current_scene_pos.y() - start_pos.y())
+                    
+                    handle_type = self.romp.selected_handle
+
+                    if self.drag_start_index is not None and (total_dx != 0 or total_dy != 0):
+                        if self.drag_axis == 1: # Was moving column
+                             indices = self.drag_start_selection if self.drag_start_selection else [self.drag_start_index]
+                             cmd = MoveColumnCommand(self.romp, self.drag_start_index, total_dx, relative=True, indices=indices, handle_type=handle_type)
+                             # Where do I get final_idx/indices?
+                             # I need to know where they ended up.
+                             # They already moved (via MouseMove).
+                             # So I don't need to execute, but I need final positions.
+                             # _move logic returns final indices based on CURRENT state.
+                             # But here state is already final.
+                             # I need to "re-capture" indices?
+                             # The indices might have shuffled.
+                             # Since I sorted/rebuilt during drag, 'indices' (from before drag?) No.
+                             # During drag, selected_indices are updated by sort_and_rebuild.
+                             # So self.romp.selected_indices_v contains the FINAL indices.
+                             cmd.final_indices = list(self.romp.selected_indices_v)
+                             # And final_idx?
+                             cmd.final_idx = self.romp.Edit_x
+                             self.romp.history.push(cmd)
+                             
+                        elif self.drag_axis == 0: # Was moving row
+                             indices = self.drag_start_selection if self.drag_start_selection else [self.drag_start_index]
+                             cmd = MoveRowCommand(self.romp, self.drag_start_index, total_dy, relative=True, indices=indices, handle_type=handle_type)
+                             cmd.final_indices = list(self.romp.selected_indices_h)
+                             cmd.final_idx = self.romp.Edit_y
+                             self.romp.history.push(cmd)
+
+                    elif self.drag_start_index is not None:
+                         # Click logic (No drag)
+                         is_ctrl = event.modifiers() & QtCore.Qt.ControlModifier
+                         if is_ctrl:
+                              if not self.did_drag_select_add:
+                                   if self.drag_axis == 1:
+                                       self.romp.select_toggle_v(self.drag_start_index)
+                                   else:
+                                       self.romp.select_toggle_h(self.drag_start_index)
+                         else:
+                              # Exclusive 
+                              if self.drag_axis == 1:
+                                   self.romp.selected_line_v = self.drag_start_index
+                                   self.romp.selected_line_h = None
+                              else:
+                                   self.romp.selected_line_v = None
+                                   self.romp.selected_line_h = self.drag_start_index
+
+                    self.last_mouse_pos = None
+                    self.drag_start_pos = None
+                    self.drag_start_index = None
+                    self.drag_axis = None
+                    self.did_drag_select_add = False
+
+                    self.romp.grid_dirty = True
+                    self.display_image(fast=False)
+
+        return super(RomparUiQt, self).eventFilter(source, event)
+
 def load_anotate(fn):
     """
     Really this is a set of (row, col): how, but that type of key doesn't map well to json
@@ -519,7 +707,7 @@ def load_anotate(fn):
     for k, v in j.items():
         c,r = k.split(",")
         ret[(int(c), int(r))] = v
-    return ret
+
 
 def run(app):
     import argparse
@@ -547,9 +735,12 @@ def run(app):
     parser.add_argument('image', nargs='?', help='Input image')
     parser.add_argument('cols_per_group', nargs='?', type=int, help='')
     parser.add_argument('rows_per_group', nargs='?', type=int, help='')
+    parser.add_argument('-j', '--threads', type=int, default=4, help='Number of threads for grid redraw')
     args = parser.parse_args()
 
     config = Config()
+    if args.threads:
+        config.threads = args.threads
     if args.radius:
         config.default_radius = args.radius
         config.radius = args.radius

@@ -97,6 +97,9 @@ class Config(object):
         self.save_dat = False
 
         self.inverted = False
+        
+        # Performance
+        self.threads = 4
 
 
     def update(self, config):

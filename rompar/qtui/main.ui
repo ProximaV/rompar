@@ -157,6 +157,9 @@
      <addaction name="separator"/>
      <addaction name="actionToggleMode"/>
     </widget>
+    <addaction name="actionUndo"/>
+    <addaction name="actionRedo"/>
+    <addaction name="separator"/>
     <addaction name="menu_mode"/>
    </widget>
    <addaction name="menuFile"/>
@@ -556,6 +559,22 @@
     <string>Ctrl+Backspace</string>
    </property>
   </action>
+   <action name="actionUndo">
+    <property name="text">
+     <string>&amp;Undo</string>
+    </property>
+    <property name="shortcut">
+     <string>Ctrl+Z</string>
+    </property>
+   </action>
+   <action name="actionRedo">
+    <property name="text">
+     <string>&amp;Redo</string>
+    </property>
+    <property name="shortcut">
+     <string>Ctrl+Y</string>
+    </property>
+   </action>
  </widget>
  <customwidgets>
   <customwidget>
