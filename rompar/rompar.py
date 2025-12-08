@@ -13,6 +13,7 @@ GREEN  = (0x00, 0xff, 0x00)
 RED    = (0x00, 0x00, 0xff)
 YELLOW = (0x00, 0xff, 0xff)
 WHITE  = (0xff, 0xff, 0xff)
+CYAN   = (0xff, 0xff, 0x00)
 
 from .history import (History, Command, MoveColumnCommand, MoveRowCommand, 
                       ToggleBitCommand, AddColumnCommand, DeleteColumnCommand, 
@@ -342,8 +343,22 @@ class Rompar(object):
              if self.mode_is_grid():
                   h_rad = 4 if is_selected else 2
                   h_col = GREEN if is_selected else YELLOW
-                  cv.circle(self.img_grid, (int(l.start), 0), h_rad, h_col, -1)
-                  cv.circle(self.img_grid, (int(l.end), self.img_height), h_rad, h_col, -1)
+                  
+                  # Start Handle
+                  rad_s = h_rad
+                  col_s = h_col
+                  if is_selected and self.selected_handle in ('start', 'both'):
+                       rad_s = 6
+                       col_s = CYAN
+                  cv.circle(self.img_grid, (int(l.start), 0), rad_s, col_s, -1)
+                  
+                  # End Handle
+                  rad_e = h_rad
+                  col_e = h_col
+                  if is_selected and self.selected_handle in ('end', 'both'):
+                       rad_e = 6
+                       col_e = CYAN
+                  cv.circle(self.img_grid, (int(l.end), self.img_height), rad_e, col_e, -1)
 
                   # Mid Handle only if selected
                   if is_selected and self.selected_handle == 'both':
@@ -370,8 +385,20 @@ class Rompar(object):
                  if self.mode_is_grid():
                       h_rad = 4 if is_selected else 2
                       h_col = GREEN if is_selected else YELLOW
-                      cv.circle(self.img_grid, (0, y1), h_rad, h_col, -1)
-                      cv.circle(self.img_grid, (self.img_width, y2), h_rad, h_col, -1)
+                      # Start Handle
+                      rad_s = h_rad
+                      col_s = h_col
+                      if is_selected and self.selected_handle in ('start', 'both'):
+                           rad_s = 6
+                           col_s = CYAN
+                      cv.circle(self.img_grid, (0, y1), rad_s, col_s, -1)
+                      # End Handle
+                      rad_e = h_rad
+                      col_e = h_col
+                      if is_selected and self.selected_handle in ('end', 'both'):
+                           rad_e = 6
+                           col_e = CYAN
+                      cv.circle(self.img_grid, (self.img_width, y2), rad_e, col_e, -1)
 
                       # Mid Handle
                       if is_selected and self.selected_handle == 'both':
@@ -550,7 +577,7 @@ class Rompar(object):
 
         self.grid_dirty = False
 
-    def render_image(self, img_display=None, rgb=False, viewport=None, fast=False):
+    def render_image(self, img_display=None, rgb=False, viewport=None, fast=False, selection_rect=None):
         t = time.time()
         if img_display is None:
              img_display = numpy.zeros(self.img_original.shape, numpy.uint8)
@@ -573,6 +600,10 @@ class Rompar(object):
 
         if self.annotate:
             self.render_annotate(img_display)
+            
+        if selection_rect:
+             x, y, w, h = selection_rect
+             cv.rectangle(img_display, (x, y), (x+w, y+h), CYAN, 1)
 
         print("render_image time:", time.time()-t)
 
@@ -1431,7 +1462,76 @@ class Rompar(object):
 
     @property
     def bit_n(self):
-        return len(self._grid_lines_v) * len(self._grid_lines_h)
+         return len(self._grid_lines_v) * len(self._grid_lines_h)
+
+    def select_in_rect(self, rect, add=False):
+        """
+        Select handles within the given rectangle (x, y, w, h).
+        Returns True if selection changed.
+        """
+        x, y, w, h = rect
+        rx, ry = x + w, y + h
+        # Ensure min/max
+        min_x, max_x = min(x, rx), max(x, rx)
+        min_y, max_y = min(y, ry), max(y, ry)
+        
+        start_hits = 0
+        end_hits = 0
+        
+        # New selection sets
+        new_sel_v = set(self.selected_indices_v) if add else set()
+        new_sel_h = set(self.selected_indices_h) if add else set()
+        
+        # Check vertical lines
+        for i, l in enumerate(self._grid_lines_v):
+             # Check Start Handle (Top, y=0)
+             # Handle radius ~6
+             # Point (l.start, 0)
+             sx, sy = int(l.start), 0
+             if min_x <= sx <= max_x and min_y <= sy <= max_y:
+                  new_sel_v.add(i)
+                  start_hits += 1
+                  
+             # Check End Handle (Bottom, y=H)
+             ex, ey = int(l.end), self.img_height
+             if min_x <= ex <= max_x and min_y <= ey <= max_y:
+                  new_sel_v.add(i)
+                  end_hits += 1
+        
+        # Check horizontal lines
+        for i, l in enumerate(self._grid_lines_h):
+             # Start Handle (Left, x=0)
+             # Point (0, l.start)
+             sx, sy = 0, int(l.start)
+             if min_x <= sx <= max_x and min_y <= sy <= max_y:
+                  new_sel_h.add(i)
+                  start_hits += 1
+                  
+             # End Handle (Right, x=W)
+             ex, ey = self.img_width, int(l.end)
+             if min_x <= ex <= max_x and min_y <= ey <= max_y:
+                  new_sel_h.add(i)
+                  end_hits += 1
+        
+        changed = (new_sel_v != self.selected_indices_v) or (new_sel_h != self.selected_indices_h)
+        self.selected_indices_v = new_sel_v
+        self.selected_indices_h = new_sel_h
+        
+        # Heuristic for handle type
+        if start_hits > end_hits:
+             self.selected_handle = 'start'
+        elif end_hits > start_hits:
+             self.selected_handle = 'end'
+        elif start_hits > 0 or end_hits > 0:
+             self.selected_handle = 'both'
+        
+        if changed:
+             self.grid_dirty = True
+             # Update legacy single selection
+             self.selected_line_v = list(self.selected_indices_v)[0] if self.selected_indices_v else None
+             self.selected_line_h = list(self.selected_indices_h)[0] if self.selected_indices_h else None
+             
+        return changed
 
     def iter_grid_intersections(self):
          mg_x, mg_y = self._calculate_grid_intersections()

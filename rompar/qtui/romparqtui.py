@@ -33,6 +33,12 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.ui = RomparUi()
         self.ui.setupUi(self)
         
+        # Add secondary shortcuts for Arrow Keys
+        self.ui.actionMoveColumnLeft.setShortcuts([QtGui.QKeySequence("Ctrl+Left"), QtGui.QKeySequence("Left")])
+        self.ui.actionMoveColumnRight.setShortcuts([QtGui.QKeySequence("Ctrl+Right"), QtGui.QKeySequence("Right")])
+        self.ui.actionMoveRowUp.setShortcuts([QtGui.QKeySequence("Ctrl+Up"), QtGui.QKeySequence("Up")])
+        self.ui.actionMoveRowDown.setShortcuts([QtGui.QKeySequence("Ctrl+Down"), QtGui.QKeySequence("Down")])
+        
         self.drag_start_pos = None
         self.drag_start_index = None
         self.drag_axis = None
@@ -70,6 +76,10 @@ class RomparUiQt(QtWidgets.QMainWindow):
         # Drag State
         self.dragging_handle = False
         self.last_mouse_pos = None
+        
+        # Box Selection State
+        self.selecting_box = False
+        self.drag_start_pos_box = None
         
         # Install Event Filter for Dragging
         self.ui.graphicsView.viewport().installEventFilter(self)
@@ -126,7 +136,15 @@ class RomparUiQt(QtWidgets.QMainWindow):
              self.ui.actionBackupSave.setEnabled(False)
 
     def display_image(self, viewport=None, fast=False):
-        self.romp.render_image(img_display=self.img, rgb=True, viewport=viewport, fast=fast)
+        selection_rect = None
+        if getattr(self, 'selecting_box', False) and getattr(self, 'drag_start_pos_box', None) and self.last_mouse_pos:
+             x = min(self.drag_start_pos_box.x(), self.last_mouse_pos.x())
+             y = min(self.drag_start_pos_box.y(), self.last_mouse_pos.y())
+             w = abs(self.last_mouse_pos.x() - self.drag_start_pos_box.x())
+             h = abs(self.last_mouse_pos.y() - self.drag_start_pos_box.y())
+             selection_rect = (int(x), int(y), int(w), int(h))
+
+        self.romp.render_image(img_display=self.img, rgb=True, viewport=viewport, fast=fast, selection_rect=selection_rect)
         self.pixmapitem.setPixmap(QtGui.QPixmap(self.qImg))
 
     def showTempStatus(self, *msg):
@@ -602,6 +620,18 @@ class RomparUiQt(QtWidgets.QMainWindow):
                              
                         self.romp.grid_dirty = True
                         self.display_image()
+                    else:
+                        # Empty space click in Grid Mode
+                        modifiers = event.modifiers()
+                        if modifiers & QtCore.Qt.ShiftModifier:
+                             # Shift-Click -> Start Box Selection
+                             # Also blocking the creation of new lines by returning True
+                             self.selecting_box = True
+                             self.drag_start_pos_box = scene_pos
+                             self.last_mouse_pos = scene_pos 
+                             return True
+                        
+                        # Otherwise allow propagation (Add Line)
             
             elif event.type() == QtCore.QEvent.MouseMove:
                 if self.dragging_handle and self.last_mouse_pos:
@@ -618,6 +648,11 @@ class RomparUiQt(QtWidgets.QMainWindow):
                         
                         self.last_mouse_pos = scene_pos
                         self.display_image(fast=True)
+                elif self.selecting_box and self.drag_start_pos_box:
+                    # Update display with selection rect
+                    scene_pos = self.ui.graphicsView.mapToScene(event.pos())
+                    self.last_mouse_pos = scene_pos # Capture current end
+                    self.display_image(fast=True)
             
             elif event.type() == QtCore.QEvent.MouseButtonRelease:
                 if self.dragging_handle:
@@ -685,6 +720,25 @@ class RomparUiQt(QtWidgets.QMainWindow):
                     self.did_drag_select_add = False
 
                     self.romp.grid_dirty = True
+                    self.display_image(fast=False)
+                
+                elif self.selecting_box:
+                    self.selecting_box = False
+                    current_scene_pos = self.ui.graphicsView.mapToScene(event.pos())
+                    start_pos = self.drag_start_pos_box
+                    
+                    if start_pos:
+                        x = min(start_pos.x(), current_scene_pos.x())
+                        y = min(start_pos.y(), current_scene_pos.y())
+                        w = abs(current_scene_pos.x() - start_pos.x())
+                        h = abs(current_scene_pos.y() - start_pos.y())
+                        rect = (int(x), int(y), int(w), int(h))
+                        
+                        is_ctrl = event.modifiers() & QtCore.Qt.ControlModifier
+                        if self.romp.select_in_rect(rect, add=is_ctrl):
+                            pass # Display updated by display_image
+                    
+                    self.drag_start_pos_box = None
                     self.display_image(fast=False)
 
         return super(RomparUiQt, self).eventFilter(source, event)
