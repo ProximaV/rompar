@@ -118,7 +118,12 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.selection_box_item.setPen(QtGui.QPen(QtCore.Qt.cyan))
         self.selection_box_item.setZValue(100) # Ensure it is on top
         self.selection_box_item.hide()
+        self.selection_box_item.setZValue(100) # Ensure it is on top
+        self.selection_box_item.hide()
         self.scene.addItem(self.selection_box_item)
+        
+        # Grid Drag Overlays
+        self.drag_lines = [] # List of (QGraphicsLineItem, original_line_obj)
 
         self.ui.graphicsView.setScene(self.scene)
         self.ui.graphicsView.setAlignment(QtCore.Qt.AlignTop|QtCore.Qt.AlignLeft)
@@ -617,6 +622,32 @@ class RomparUiQt(QtWidgets.QMainWindow):
                              self.drag_start_selection = list(self.romp.selected_indices_h)
                              self.drag_start_index = idx
                              
+                             self.drag_start_selection = list(self.romp.selected_indices_h)
+                             self.drag_start_index = idx
+                             
+                        # Create overlay items for dragged lines
+                        self.drag_lines = []
+                        indices = self.drag_start_selection if self.drag_start_selection else [idx]
+                        lines = self.romp._grid_lines_v if self.drag_axis == 1 else self.romp._grid_lines_h
+                        
+                        for i in indices:
+                            if 0 <= i < len(lines):
+                                l = lines[i]
+                                item = QtWidgets.QGraphicsLineItem()
+                                pen = QtGui.QPen(QtCore.Qt.green)
+                                pen.setWidth(2)
+                                item.setPen(pen)
+                                item.setZValue(101) # Above selection box
+                                
+                                if self.drag_axis == 1: # Vert
+                                     item.setLine(l.start, 0, l.end, self.romp.img_height)
+                                else: # Horiz
+                                     item.setLine(0, l.start, self.romp.img_width, l.end)
+                                
+                                self.scene.addItem(item)
+                                # Store item and original coordinates to compute offsets
+                                self.drag_lines.append((item, l.start, l.end))
+
                         self.romp.grid_dirty = True
                         self.display_image()
                     else:
@@ -633,20 +664,31 @@ class RomparUiQt(QtWidgets.QMainWindow):
                         # Otherwise allow propagation (Add Line)
             
             elif event.type() == QtCore.QEvent.MouseMove:
-                if self.dragging_handle and self.last_mouse_pos:
+                if self.dragging_handle and self.drag_start_pos:
                     scene_pos = self.ui.graphicsView.mapToScene(event.pos())
-                    dx = int(scene_pos.x() - self.last_mouse_pos.x())
-                    dy = int(scene_pos.y() - self.last_mouse_pos.y())
+                    # Use total delta from start for overlay updates
+                    total_dx = int(scene_pos.x() - self.drag_start_pos.x())
+                    total_dy = int(scene_pos.y() - self.drag_start_pos.y())
                     
-                    if dx != 0 or dy != 0:
-                        if self.romp.Edit_x >= 0:
-                            # Pass push_history=False to avoid flooding
-                            self.romp.move_bit_column(self.romp.Edit_x, dx, relative=True, push_history=False)
-                        elif self.romp.Edit_y >= 0:
-                            self.romp.move_bit_row(self.romp.Edit_y, dy, relative=True, push_history=False)
+                    if total_dx != 0 or total_dy != 0:
+                        # Update overlay items instead of full render
+                        handle_type = self.romp.selected_handle
+                        
+                        for item, start, end in self.drag_lines:
+                             new_start = start
+                             new_end = end
+                             
+                             if self.drag_axis == 1: # Vertical
+                                  if handle_type in ('start', 'both'): new_start += total_dx
+                                  if handle_type in ('end', 'both'): new_end += total_dx
+                                  item.setLine(new_start, 0, new_end, self.romp.img_height)
+                             else: # Horizontal
+                                  if handle_type in ('start', 'both'): new_start += total_dy
+                                  if handle_type in ('end', 'both'): new_end += total_dy
+                                  item.setLine(0, new_start, self.romp.img_width, new_end)
                         
                         self.last_mouse_pos = scene_pos
-                        self.display_image(fast=True)
+                        # self.display_image(fast=True) # REMOVED
                 elif self.selecting_box and self.drag_start_pos_box:
                     # Update display with selection rect
                     scene_pos = self.ui.graphicsView.mapToScene(event.pos())
@@ -678,6 +720,21 @@ class RomparUiQt(QtWidgets.QMainWindow):
                     if self.drag_start_index is not None and (total_dx != 0 or total_dy != 0):
                         if self.drag_axis == 1: # Was moving column
                              indices = self.drag_start_selection if self.drag_start_selection else [self.drag_start_index]
+                             # NOW apply the move to the model once
+                             # Note: The model wasn't moved during drag, so we need to move it now.
+                             # But `move_bit_column` usually takes one index (Edit_x). 
+                             # If we have multiple indices, we need to be careful.
+                             # `move_bit_column` implementation might only move one line? 
+                             # Let's check `move_bit_column` logic. It moves `Edit_x` OR `indices`?
+                             # In original code, it called `move_bit_column(self.romp.Edit_x ...)`.
+                             # If multiselect, `Edit_x` is just the primary one. 
+                             # Does `move_bit_column` handle multiselect?
+                             # Looking at `rompar.py` (not visible here but implied/assumed), 
+                             # `move_bit_column` seems to handle it if `idx` is passed.
+                             # Actually, in original code `MouseMove`: `self.romp.move_bit_column(self.romp.Edit_x, dx...)`.
+                             # So we should replicate that call here with `total_dx`.
+                             self.romp.move_bit_column(self.romp.Edit_x, total_dx, relative=True, push_history=False)
+                             
                              cmd = MoveColumnCommand(self.romp, self.drag_start_index, total_dx, relative=True, indices=indices, handle_type=handle_type)
                              # Where do I get final_idx/indices?
                              # I need to know where they ended up.
@@ -697,10 +754,15 @@ class RomparUiQt(QtWidgets.QMainWindow):
                              
                         elif self.drag_axis == 0: # Was moving row
                              indices = self.drag_start_selection if self.drag_start_selection else [self.drag_start_index]
+                             # NOW apply the move to the model once
+                             self.romp.move_bit_row(self.romp.Edit_y, total_dy, relative=True, push_history=False)
+                             
                              cmd = MoveRowCommand(self.romp, self.drag_start_index, total_dy, relative=True, indices=indices, handle_type=handle_type)
                              cmd.final_indices = list(self.romp.selected_indices_h)
                              cmd.final_idx = self.romp.Edit_y
                              self.romp.history.push(cmd)
+
+
 
                     elif self.drag_start_index is not None:
                          # Click logic (No drag)
@@ -719,6 +781,11 @@ class RomparUiQt(QtWidgets.QMainWindow):
                               else:
                                    self.romp.selected_line_v = None
                                    self.romp.selected_line_h = self.drag_start_index
+
+                    # Cleanup drag items
+                    for item, _, _ in self.drag_lines:
+                         self.scene.removeItem(item)
+                    self.drag_lines = []
 
                     self.last_mouse_pos = None
                     self.drag_start_pos = None
