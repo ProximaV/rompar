@@ -112,6 +112,13 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.pixmapitem = QtWidgets.QGraphicsPixmapItem()
         self.scene = QtWidgets.QGraphicsScene()
         self.scene.addItem(self.pixmapitem)
+        
+        # Selection Box Item (Hidden by default)
+        self.selection_box_item = QtWidgets.QGraphicsRectItem()
+        self.selection_box_item.setPen(QtGui.QPen(QtCore.Qt.cyan))
+        self.selection_box_item.setZValue(100) # Ensure it is on top
+        self.selection_box_item.hide()
+        self.scene.addItem(self.selection_box_item)
 
         self.ui.graphicsView.setScene(self.scene)
         self.ui.graphicsView.setAlignment(QtCore.Qt.AlignTop|QtCore.Qt.AlignLeft)
@@ -136,15 +143,7 @@ class RomparUiQt(QtWidgets.QMainWindow):
              self.ui.actionBackupSave.setEnabled(False)
 
     def display_image(self, viewport=None, fast=False):
-        selection_rect = None
-        if getattr(self, 'selecting_box', False) and getattr(self, 'drag_start_pos_box', None) and self.last_mouse_pos:
-             x = min(self.drag_start_pos_box.x(), self.last_mouse_pos.x())
-             y = min(self.drag_start_pos_box.y(), self.last_mouse_pos.y())
-             w = abs(self.last_mouse_pos.x() - self.drag_start_pos_box.x())
-             h = abs(self.last_mouse_pos.y() - self.drag_start_pos_box.y())
-             selection_rect = (int(x), int(y), int(w), int(h))
-
-        self.romp.render_image(img_display=self.img, rgb=True, viewport=viewport, fast=fast, selection_rect=selection_rect)
+        self.romp.render_image(img_display=self.img, rgb=True, viewport=viewport, fast=fast)
         self.pixmapitem.setPixmap(QtGui.QPixmap(self.qImg))
 
     def showTempStatus(self, *msg):
@@ -652,7 +651,15 @@ class RomparUiQt(QtWidgets.QMainWindow):
                     # Update display with selection rect
                     scene_pos = self.ui.graphicsView.mapToScene(event.pos())
                     self.last_mouse_pos = scene_pos # Capture current end
-                    self.display_image(fast=True)
+                    
+                    # Update QGraphicsRectItem
+                    x = min(self.drag_start_pos_box.x(), scene_pos.x())
+                    y = min(self.drag_start_pos_box.y(), scene_pos.y())
+                    w = abs(scene_pos.x() - self.drag_start_pos_box.x())
+                    h = abs(scene_pos.y() - self.drag_start_pos_box.y())
+                    self.selection_box_item.setRect(x, y, w, h)
+                    self.selection_box_item.show()
+                    # No need to call display_image() here for selection box
             
             elif event.type() == QtCore.QEvent.MouseButtonRelease:
                 if self.dragging_handle:
@@ -739,6 +746,7 @@ class RomparUiQt(QtWidgets.QMainWindow):
                             pass # Display updated by display_image
                     
                     self.drag_start_pos_box = None
+                    self.selection_box_item.hide()
                     self.display_image(fast=False)
 
         return super(RomparUiQt, self).eventFilter(source, event)

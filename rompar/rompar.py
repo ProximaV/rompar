@@ -577,7 +577,7 @@ class Rompar(object):
 
         self.grid_dirty = False
 
-    def render_image(self, img_display=None, rgb=False, viewport=None, fast=False, selection_rect=None):
+    def render_image(self, img_display=None, rgb=False, viewport=None, fast=False):
         t = time.time()
         if img_display is None:
              img_display = numpy.zeros(self.img_original.shape, numpy.uint8)
@@ -601,10 +601,6 @@ class Rompar(object):
         if self.annotate:
             self.render_annotate(img_display)
             
-        if selection_rect:
-             x, y, w, h = selection_rect
-             cv.rectangle(img_display, (x, y), (x+w, y+h), CYAN, 1)
-
         print("render_image time:", time.time()-t)
 
         if rgb:
