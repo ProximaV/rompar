@@ -68,6 +68,7 @@ There is now an undo/redo stack that can be accessed with Ctrl-Z and Ctrl-Y.
 Colors:
   * Green: detected as bright spot ("1")
   * Blue: detected as dark spot ("0")
+  * Cyan: in Nor Mask Rom mode,detected paired bit to the right is not opposite of current bit
 
 There are some more advanced ML aspects that were explored but never merged in. This is still an open area to explore
 

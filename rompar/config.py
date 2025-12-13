@@ -101,6 +101,11 @@ class Config(object):
         # Performance
         self.threads = 4
 
+        # NOR Mask ROM Mode
+        self.nor_mask_mode = False
+        self.nor_offset_factor = 2.2
+        self.nor_radius_factor = 1.0
+
 
     def update(self, config):
         for k, v in config.items():

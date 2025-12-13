@@ -101,6 +101,7 @@
     </property>
     <addaction name="actionDataInverted"/>
     <addaction name="actionDataLSBitMode"/>
+    <addaction name="actionDataNorMaskMode"/>
     <addaction name="actionFindHex"/>
     <addaction name="actionSaveDataAsText"/>
     <addaction name="actionRereadData"/>
@@ -385,6 +386,14 @@
    </property>
    <property name="shortcut">
     <string>L</string>
+   </property>
+  </action>
+  <action name="actionDataNorMaskMode">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>&amp;NOR Mask Mode</string>
    </property>
   </action>
   <action name="actionShowPeephole">

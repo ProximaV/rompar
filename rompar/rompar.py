@@ -164,6 +164,8 @@ class Rompar(object):
         self.__process_target_image()
 
         self.__data = numpy.ndarray((self.bit_height, self.bit_width), dtype=bool)
+        
+        self.nor_errors = set()
 
         if not (grid_json and grid_json['data'] and
                 self.__parse_grid_bit_data(grid_json['data'])):
@@ -233,6 +235,10 @@ class Rompar(object):
         # Respect loaded radius if present
         if grid_json.get('radius'):
              self.config.radius = grid_json.get('radius')
+             
+        # Initialize NOR errors if mode is enabled (though empty set is fine)
+        if self.config.nor_mask_mode:
+             self.update_nor_errors()
 
     def shift_xy(self, dx, dy):
         """Move data points a relative amount relative to existing image. Used to align an old project to a new image"""
@@ -541,7 +547,47 @@ class Rompar(object):
             futures = []
             
             # Process each color group
-            for grid_mask, color in [(grid_blue, BLUE), (grid_green, GREEN), (grid_red, RED), (grid_white, WHITE)]:
+            # Process each color group
+            # Separate NOR errors if any
+            grid_nor_err = None
+            if self.nor_errors:
+                 # Create mask for NOR errors
+                 grid_nor_err = numpy.zeros(data_state.shape, dtype=bool)
+                 # Populate mask from set logic (slow?) or iterate set
+                 # Better to iterate errors separately or subtract from regular masks?
+                 # If error, it should probably override normal color (Green/Blue/Red/White) or be Cyan.
+                 # Let's iterate errors separately.
+                 pass
+
+            # Update masks for NOR errors?
+            # Actually, let's just draw NOR errors AT THE END (or instead of others).
+            # If a bit is in NOR errors, we want it explicitly COLORED.
+            # But the bit is ALSO in grid_green or grid_blue.
+            # So we should REMOVE it from those?
+            if self.config.nor_mask_mode and self.nor_errors:
+                 # It's expensive to iterate set and update mask every time?
+                 # self.nor_errors contains BitXY objects.
+                 # Let's handle it by creating a tuple list logic.
+                 # Or just rebuild a mask for errors.
+                 err_mask = numpy.zeros(data_state.shape, dtype=bool)
+                 for b in self.nor_errors:
+                      if 0 <= b.x < data_state.shape[1] and 0 <= b.y < data_state.shape[0]:
+                           err_mask[b.y, b.x] = True
+                 
+                 # Remove from others
+                 if grid_blue is not None: grid_blue &= ~err_mask
+                 if grid_green is not None: grid_green &= ~err_mask
+                 if grid_red is not None: grid_red &= ~err_mask
+                 if grid_white is not None: grid_white &= ~err_mask
+            
+                 # Add to list
+                 pass # Will handle in loop construction below
+
+            layers = [(grid_blue, BLUE), (grid_green, GREEN), (grid_red, RED), (grid_white, WHITE)]
+            if self.config.nor_mask_mode and self.nor_errors:
+                 layers.append((err_mask, CYAN))
+
+            for grid_mask, color in layers:
                 if grid_mask is None or not numpy.any(grid_mask):
                     continue
                 
@@ -724,6 +770,90 @@ class Rompar(object):
                                       img_xy.x - delta:img_xy.x + delta]
             value = datasub.sum(dtype=int)
             self.set_data(bit_xy, value > thresh)
+            
+        if self.config.nor_mask_mode:
+            self.update_nor_errors()
+
+    def get_region_sum(self, img_xy, radius):
+        delta = int(radius // 2)
+        if delta < 1: delta = 1
+        
+        # Clamp coordinates
+        x, y = img_xy
+        x0 = max(0, x - delta)
+        y0 = max(0, y - delta)
+        x1 = min(self.img_width, x + delta)
+        y1 = min(self.img_height, y + delta)
+        
+        if x0 >= x1 or y0 >= y1: return 0
+        
+        datasub = self.img_target[y0:y1, x0:x1] # y, x
+        return datasub.sum(dtype=int)
+
+    def check_nor_error(self, bit_xy):
+        if not self.config.nor_mask_mode: 
+             return
+             
+        # Get Primary Value
+        try:
+             primary_val = self.get_data(bit_xy)
+        except IndexError:
+             return
+             
+        # Calculate Secondary Position
+        img_xy = self.bitxy_to_imgxy(bit_xy)
+        offset = int(self.config.radius * self.config.nor_offset_factor)
+        sec_xy = ImgXY(img_xy.x + offset, img_xy.y)
+        
+        # Calculate Secondary Value
+        # Should we use same threshold ratio?
+        # Assuming secondary bit behaves like primary.
+        sec_radius = self.config.radius * self.config.nor_radius_factor
+        
+        maxval = (sec_radius ** 2) * 255
+        thresh = (maxval / self.config.bit_thresh_div) * 1.5 # Heuristic adjustment? Or keep same.
+        # User didn't specify different threshold. Let's stick to strict same logic but scaled by radius area.
+        # Actually maxval is proportional to radius^2.
+        
+        # Recalculate maxval based on integer delta box size actually used
+        delta = int(sec_radius // 2)
+        if delta < 1: delta = 1
+        # Area = (2*delta)^2 approx. 
+        # get_region_sum uses actual calc.
+        
+        val_sum = self.get_region_sum(sec_xy, sec_radius)
+        # Threshold:
+        # bit_thresh_div 10 => 1/10th of max brightness on average?
+        # Max sum = area * 255.
+        actual_area = (2*delta) * (2*delta) # Roughly, considering clamping it might be smaller but ignore edge cases for thresh
+        max_possible = actual_area * 255
+        thresh = max_possible / self.config.bit_thresh_div
+        
+        sec_val = val_sum > thresh
+        
+        # NOR Logic: Primary and Secondary should be OPPOSITE.
+        # If they are EQUAL, it is an error.
+        
+        # Special case: Handling manual toggle vs auto read.
+        # If user toggled primary, we check consistentcy.
+        if primary_val == sec_val:
+             self.nor_errors.add(bit_xy)
+        else:
+             self.nor_errors.discard(bit_xy)
+
+    def update_nor_errors(self, bit_pairs=None):
+         if not self.config.nor_mask_mode:
+              self.nor_errors.clear()
+              return
+
+         if bit_pairs is None:
+              self.nor_errors.clear()
+              bit_pairs = self.iter_bitxy()
+         
+         # TODO: Vectorize this?
+         # For now iterative is fine, might be slow on huge ROMs.
+         for bit_xy in bit_pairs:
+              self.check_nor_error(bit_xy)
 
     def get_pixel(self, img_xy):
         img_x, img_y = img_xy
@@ -923,6 +1053,12 @@ class Rompar(object):
         self.__data[bit_y, bit_x] = bool(val)
         self.data_dirty = True
         self.grid_dirty = True
+        self.data_dirty = True
+        self.grid_dirty = True
+        
+        if self.config.nor_mask_mode:
+             self.check_nor_error(bit_xy)
+             
         return bool(val)
 
     def toggle_data(self, bit_xy):

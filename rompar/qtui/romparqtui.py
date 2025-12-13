@@ -107,6 +107,7 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.ui.actionShowData.setChecked(self.config.img_display_data)
         self.ui.actionDataInverted.setChecked(self.config.inverted)
         self.ui.actionDataLSBitMode.setChecked(self.config.LSB_Mode)
+        self.ui.actionDataNorMaskMode.setChecked(self.config.nor_mask_mode)
 
         # Create buffers to show Rompar image in UI.
         self.pixmapitem = QtWidgets.QGraphicsPixmapItem()
@@ -487,6 +488,14 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.config.LSB_Mode = checked
         if self.config.img_display_data:
             self.display_image()
+
+    @QtCore.pyqtSlot(bool)
+    def on_actionDataNorMaskMode_triggered(self, checked):
+        self.showTempStatus('NOR Mask Mode', "on" if checked else "off")
+        self.config.nor_mask_mode = checked
+        self.romp.update_nor_errors() # Full recalculation
+        self.romp.grid_dirty = True # Force redraw
+        self.display_image()
 
     # Edit Grid Buttons
     @QtCore.pyqtSlot()
