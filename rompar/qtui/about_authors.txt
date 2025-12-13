@@ -9,3 +9,8 @@ Caitlin Morgan <23minds@gmail.com>
 
 Jessy Diamond Exum <jessy.diamondman@gmail.com>
     Split API from UI, and ported to Qt5.
+
+Proxima and Antigravity (Google DeepMind)
+    Multi-select handles support.
+    Comprehensive Undo/Redo for grid operations.
+    Fixes for crash and regression.
