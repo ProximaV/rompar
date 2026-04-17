@@ -387,8 +387,8 @@ class RomparUiQt(QtWidgets.QMainWindow):
         self.display_image()
     @QtCore.pyqtSlot()
     def on_actionErodeDecrease_triggered(self):
-        self.config.font_size = max(self.config.font_size - 0.1, 0)
-        self.showTempStatus('Erode %f' % self.config.erode)
+        self.config.erode = max(self.config.erode - 1, 0)
+        self.showTempStatus('Erode %d' % self.config.erode)
         self.romp.read_data()
         self.display_image()
 
@@ -396,13 +396,13 @@ class RomparUiQt(QtWidgets.QMainWindow):
     def on_actionFontIncrease_triggered(self):
         self.config.font_size += 0.1
         self.showTempStatus('Font Size %f' % self.config.font_size)
-        self.romp.read_data()
+        self.romp.data_dirty = True
         self.display_image()
     @QtCore.pyqtSlot()
     def on_actionFontDecrease_triggered(self):
         self.config.font_size = max(self.config.font_size - 0.1, 0)
         self.showTempStatus('Font Size %f' % self.config.font_size)
-        self.romp.read_data()
+        self.romp.data_dirty = True
         self.display_image()
 
     @QtCore.pyqtSlot()

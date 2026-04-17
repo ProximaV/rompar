@@ -5,7 +5,6 @@ import json
 import numpy
 import time
 import pathlib
-import concurrent.futures
 
 BLACK  = (0x00, 0x00, 0x00)
 BLUE   = (0xff, 0x00, 0x00)
@@ -109,6 +108,18 @@ class Rompar(object):
         # Allow skipping of process_target_image if nothing changed.
         self.__process_cache = None
 
+        # Cached grid intersection coordinates (mg_x, mg_y) numpy arrays.
+        # Invalidated when grid lines change.
+        self._grid_intersections_cache = None
+        self._grid_intersections_key = None
+
+        # Cached boxFilter sum image + grid point values.
+        # Invalidated when img_target or radius changes.
+        self._sum_img_cache = None
+        self._sum_img_key = None
+        self._grid_values_cache = None
+        self._grid_values_key = None
+
         # Pixels between cols and rows
         self.step_x, self.step_y = (0, 0)
         # Number of rows/cols per bit grouping
@@ -159,7 +170,8 @@ class Rompar(object):
         
         self.history = History()
         
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.threads)
+        # Cache for precomputed circle offset arrays keyed by (radius, thickness)
+        self._circle_offset_cache = {}
 
         self.__process_target_image()
 
@@ -277,15 +289,28 @@ class Rompar(object):
                 self.set_data(BitXY(bit_x, bit_y), next(bit_iter))
         return True
 
+    def _invalidate_grid_cache(self):
+        self._grid_intersections_cache = None
+        self._grid_intersections_key = None
+
     def _calculate_grid_intersections(self):
+        # Build a cache key from grid line positions
+        key = (
+            tuple((l.start, l.end) for l in self._grid_lines_v),
+            tuple((l.start, l.end) for l in self._grid_lines_h),
+            self.img_height, self.img_width,
+        )
+        if self._grid_intersections_key == key and self._grid_intersections_cache is not None:
+            return self._grid_intersections_cache
+
         # Arrays of start/end
         Vs = numpy.array([l.start for l in self._grid_lines_v])
         Ve = numpy.array([l.end for l in self._grid_lines_v])
         Hs = numpy.array([l.start for l in self._grid_lines_h])
         He = numpy.array([l.end for l in self._grid_lines_h])
-        
+
         H, W = self.img_height, self.img_width
-        
+
         # Avoid division by zero if no lines
         if len(Vs) == 0: Vs = numpy.zeros(0)
         if len(Ve) == 0: Ve = numpy.zeros(0)
@@ -296,21 +321,57 @@ class Rompar(object):
         # dv: (1, Nc), dh: (Nr, 1)
         dv = ((Ve - Vs) / H).reshape(1, -1) if H > 0 else numpy.zeros((1, len(Vs)))
         dh = ((He - Hs) / W).reshape(-1, 1) if W > 0 else numpy.zeros((len(Hs), 1))
-        
+
         Vs = Vs.reshape(1, -1)
         Hs = Hs.reshape(-1, 1)
-        
+
         # x = (Vs + dv*Hs) / (1 - dv*dh)
         # y = Hs + dh * x
-        
+
         denom = 1.0 - dv * dh
         # Handle parallel case safety (though unlikely to be exactly 0 unless perfectly diagonal vs diagonal)
-        denom[numpy.abs(denom) < 1e-9] = 1.0 
-        
+        denom[numpy.abs(denom) < 1e-9] = 1.0
+
         grid_x = (Vs + dv * Hs) / denom
         grid_y = Hs + dh * grid_x
-        
-        return grid_x.astype(int), grid_y.astype(int)
+
+        result = (grid_x.astype(int), grid_y.astype(int))
+        self._grid_intersections_cache = result
+        self._grid_intersections_key = key
+        return result
+
+    def _get_circle_offsets(self, radius, thickness=-1):
+        """Return cached (dy_offsets, dx_offsets) arrays for a circle kernel."""
+        key = (radius, thickness)
+        if key not in self._circle_offset_cache:
+            y, x = numpy.ogrid[-radius:radius+1, -radius:radius+1]
+            dist_sq = x * x + y * y
+            r_sq = radius * radius
+            if thickness < 0:  # filled
+                mask = dist_sq <= r_sq
+            else:
+                inner_r = max(radius - thickness, 0)
+                mask = (dist_sq <= r_sq) & (dist_sq >= inner_r * inner_r)
+            ky, kx = numpy.where(mask)
+            self._circle_offset_cache[key] = (ky - radius, kx - radius)
+        return self._circle_offset_cache[key]
+
+    def _stamp_circles(self, img, xs, ys, radius, color, thickness=-1):
+        """Draw circles at all (xs[i], ys[i]) using vectorized numpy ops.
+        Replaces per-point cv.circle loops with ~K numpy broadcast ops
+        where K = number of pixels in the circle kernel."""
+        if len(xs) == 0:
+            return
+        dy_offsets, dx_offsets = self._get_circle_offsets(radius, thickness)
+        h, w = img.shape[:2]
+        color_arr = numpy.array(color, dtype=numpy.uint8)
+
+        for dy, dx in zip(dy_offsets, dx_offsets):
+            ty = ys + int(dy)
+            tx = xs + int(dx)
+            valid = (ty >= 0) & (ty < h) & (tx >= 0) & (tx < w)
+            if numpy.any(valid):
+                img[ty[valid], tx[valid]] = color_arr
 
     def redraw_grid(self, viewport=None, fast=False):
         if not self.grid_dirty and viewport is None:
@@ -510,116 +571,37 @@ class Rompar(object):
         else:
              viewport_mask = numpy.ones(mg_x.shape, dtype=bool) # for peephole filtering
              
-        # Prepare Peephole (All points)
-        # We need (x, y) pairs for all grid points
-        # mg_x, mg_y are (H_grid, W_grid) arrays of coordinates
-        # Filter by viewport mask for efficient peephole drawing
-        # Flatten and convert to python list for fast iteration
-        
-        # Optimization: use viewport_mask on mg_x/mg_y before ravel
-        all_x = mg_x[viewport_mask].ravel().tolist()
-        all_y = mg_y[viewport_mask].ravel().tolist()
-        
-        # Draw Peephole loops
-        # radius + 1
+        # --- Peephole: vectorized filled circle stamps ---
         pr = int(self.config.radius) + 1
-        
-        # Use zip for fast iteration
-        for x, y in zip(all_x, all_y):
-            cv.circle(self.img_peephole, (x, y), pr, WHITE, -1)
+        all_x = mg_x[viewport_mask].ravel()
+        all_y = mg_y[viewport_mask].ravel()
+        self._stamp_circles(self.img_peephole, all_x, all_y, pr, WHITE, thickness=-1)
 
-        # Draw Colors
-        # Define drawing properties
+        # --- Bit circles: vectorized outlined circle stamps ---
         rad = int(self.config.radius)
         thick = 2
-        
-        def draw_subset(xs, ys, color, radius, thickness, img):
-            # Inner loop in python is the bottleneck
-            # Splitting it across threads helps if GIL allows cv.circle to run
-            # OpenCV's bind functions often give up GIL
-            for x, y in zip(xs, ys):
-                cv.circle(img, (x, y), radius, color, thickness)
-        
-        # with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.threads) as executor:
-        # Re-use executor to save thread creation time
-        if True: 
-            executor = self.executor
-            futures = []
-            
-            # Process each color group
-            # Process each color group
-            # Separate NOR errors if any
-            grid_nor_err = None
-            if self.nor_errors:
-                 # Create mask for NOR errors
-                 grid_nor_err = numpy.zeros(data_state.shape, dtype=bool)
-                 # Populate mask from set logic (slow?) or iterate set
-                 # Better to iterate errors separately or subtract from regular masks?
-                 # If error, it should probably override normal color (Green/Blue/Red/White) or be Cyan.
-                 # Let's iterate errors separately.
-                 pass
 
-            # Update masks for NOR errors?
-            # Actually, let's just draw NOR errors AT THE END (or instead of others).
-            # If a bit is in NOR errors, we want it explicitly COLORED.
-            # But the bit is ALSO in grid_green or grid_blue.
-            # So we should REMOVE it from those?
-            if self.config.nor_mask_mode and self.nor_errors:
-                 # It's expensive to iterate set and update mask every time?
-                 # self.nor_errors contains BitXY objects.
-                 # Let's handle it by creating a tuple list logic.
-                 # Or just rebuild a mask for errors.
-                 err_mask = numpy.zeros(data_state.shape, dtype=bool)
-                 for b in self.nor_errors:
-                      if 0 <= b.x < data_state.shape[1] and 0 <= b.y < data_state.shape[0]:
-                           err_mask[b.y, b.x] = True
-                 
-                 # Remove from others
-                 if grid_blue is not None: grid_blue &= ~err_mask
-                 if grid_green is not None: grid_green &= ~err_mask
-                 if grid_red is not None: grid_red &= ~err_mask
-                 if grid_white is not None: grid_white &= ~err_mask
-            
-                 # Add to list
-                 pass # Will handle in loop construction below
+        # NOR error mask
+        if self.config.nor_mask_mode and self.nor_errors:
+             err_mask = numpy.zeros(data_state.shape, dtype=bool)
+             for b in self.nor_errors:
+                  if 0 <= b.x < data_state.shape[1] and 0 <= b.y < data_state.shape[0]:
+                       err_mask[b.y, b.x] = True
+             if grid_blue is not None: grid_blue &= ~err_mask
+             if grid_green is not None: grid_green &= ~err_mask
+             if grid_red is not None: grid_red &= ~err_mask
+             if grid_white is not None: grid_white &= ~err_mask
 
-            layers = [(grid_blue, BLUE), (grid_green, GREEN), (grid_red, RED), (grid_white, WHITE)]
-            if self.config.nor_mask_mode and self.nor_errors:
-                 layers.append((err_mask, CYAN))
+        layers = [(grid_blue, BLUE), (grid_green, GREEN), (grid_red, RED), (grid_white, WHITE)]
+        if self.config.nor_mask_mode and self.nor_errors:
+             layers.append((err_mask, CYAN))
 
-            for grid_mask, color in layers:
-                if grid_mask is None or not numpy.any(grid_mask):
-                    continue
-                
-                # Extract coordinates
-                # This numpy access is fast
-                xs = mg_x[grid_mask].ravel()
-                ys = mg_y[grid_mask].ravel()
-                
-                n_points = len(xs)
-                if n_points == 0: continue
-                
-                # Chunking
-                # Adjust chunks based on count
-                n_chunks = self.config.threads
-                if n_points < 100000: n_chunks = 1
-                
-                chunk_size = (n_points + n_chunks - 1) // n_chunks
-                
-                if n_chunks == 1:
-                     # Avoid threading overhead for single chunk
-                     draw_subset(xs.tolist(), ys.tolist(), color, rad, thick, self.img_grid)
-                else:
-                    for i in range(0, n_points, chunk_size):
-                        end = min(i + chunk_size, n_points)
-                        
-                        sub_x = xs[i:end].tolist()
-                        sub_y = ys[i:end].tolist()
-                        
-                        futures.append(executor.submit(draw_subset, sub_x, sub_y, color, rad, thick, self.img_grid))
-            
-            # Wait for all
-            concurrent.futures.wait(futures)
+        for grid_mask, color in layers:
+            if grid_mask is None or not numpy.any(grid_mask):
+                continue
+            xs = mg_x[grid_mask].ravel()
+            ys = mg_y[grid_mask].ravel()
+            self._stamp_circles(self.img_grid, xs, ys, rad, color, thickness=thick)
 
         self.grid_dirty = False
 
@@ -654,103 +636,66 @@ class Rompar(object):
 
         return img_display
 
+    def _get_grid_values(self):
+        """Get cached per-grid-point sum values. Recomputes boxFilter only when
+        img_target or radius changes; reuses cached sums otherwise."""
+        process_redone = self.__process_target_image()
+
+        delta = int(self.config.radius // 2)
+        ksize = (max(delta * 2, 1), max(delta * 2, 1))
+
+        # Cache key for the expensive boxFilter convolution
+        sum_key = (self.__process_cache, self.config.radius)
+        if process_redone or self._sum_img_cache is None or self._sum_img_key != sum_key:
+            self._sum_img_cache = cv.boxFilter(
+                self.img_target, cv.CV_32S, ksize,
+                normalize=False, borderType=cv.BORDER_CONSTANT)
+            self._sum_img_key = sum_key
+            # Invalidate downstream grid-values cache
+            self._grid_values_cache = None
+            self._grid_values_key = None
+
+        # Cache key for extracting values at grid intersection points
+        mg_x, mg_y = self._calculate_grid_intersections()
+        grid_key = (sum_key, self._grid_intersections_key)
+        if self._grid_values_cache is None or self._grid_values_key != grid_key:
+            if mg_x.size == 0:
+                self._grid_values_cache = numpy.array([])
+                self._grid_values_key = grid_key
+                return self._grid_values_cache
+
+            h, w = self.img_shape[:2]
+            grid_x_safe = numpy.clip(mg_x, 0, w - 1)
+            grid_y_safe = numpy.clip(mg_y, 0, h - 1)
+
+            values = self._sum_img_cache[grid_y_safe, grid_x_safe]
+            if len(values.shape) == 3:
+                values = values.sum(axis=2)
+
+            self._grid_values_cache = values
+            self._grid_values_key = grid_key
+
+        return self._grid_values_cache
+
     def read_data(self, bit_pairs=None):
         process_redone = self.__process_target_image()
         if process_redone or bit_pairs is None:
-            # Vectorized full update
-            bit_pairs = self.iter_bitxy()
-            
-            # maximum possible value if all pixels are set
             maxval = (self.config.radius ** 2) * 255
             thresh = (maxval / self.config.bit_thresh_div)
-            delta = int(self.config.radius // 2)
-            
-            print('read_data: computing (vectorized)')
-            
-            # Use boxFilter to sum pixels in window
-            # boxFilter sums if normalize=False
-            ksize = (delta * 2, delta * 2)
-            
-            # Handle edge case where radius/delta is small
-            if ksize[0] < 1: ksize = (1, 1)
-                
-            # Compute sum for every pixel
-            # ddepth=-1 means same depth as source (uint8), but sum can overflow uint8
-            # So we use CV_32S or CV_64F. Source is uint8.
-            sum_img = cv.boxFilter(self.img_target, cv.CV_32S, ksize, normalize=False, borderType=cv.BORDER_CONSTANT)
-            
-            # Now extract values at grid points
-            # We assume grid points are valid coordinates
-            # Note: boxFilter anchors at center. 
-            # Slice in original code: [y-delta : y+delta]. 
-            # Center of slicing window of size 2*delta is at 'delta' offset from top-left.
-            # Grid point is at 'y'.
-            # If window is [y-delta, y+delta], the center relative to y is 0 (if even size?).
-            # OpenCV boxFilter anchor default is (-1,-1) i.e. center.
-            # If ksize is even (2*delta), center is at (ksize-1)/2.
-            # Example delta=2, ksize=4. center index 1.5 -> 1 or 2.
-            # We need to match precise sum window. 
-            # Current code: y-delta to y+delta. Length 2*delta.
-            # Center of this range is y.
-            # So boxFilter centered at y should match.
-            
-            # Use advanced indexing to get all values at once
-            # bit_xy in bit_pairs gives us bit coordinates. 
-            # We need to map to img coordinates.
-            # But since we are iterating ALL bits (bit_pairs is basically all), 
-            # we can just use _grid_points.
-            
-            # To handle potential non-uniform grid or partial updates (if logic falls through),
-            # we should be careful. 
-            # But here we are in the "full update" block mostly.
-            # The optimization is most valuable for full update.
-            
-            # Construct meshgrid of coordinates
-            # Only valid if grid is uniform? No, iter_bitxy iterates all combinations.
-            # So we can use broadcasting.
-            # Construct meshgrid of coordinates using skewed lines
-            mg_x, mg_y = self._calculate_grid_intersections()
-            
-            if mg_x.size == 0:
+
+            values = self._get_grid_values()
+            if values.size == 0:
                 return
 
-            # Map to integer coordinates (they should be ints already)
-            
-            # Validate bounds
-            h, w = self.img_shape[:2]
-            grid_x_safe = numpy.clip(mg_x, 0, w-1)
-            grid_y_safe = numpy.clip(mg_y, 0, h-1)
-            
-            # Extract sums
-            # Note: we are assigning to self.__data which is (bit_height, bit_width)
-            # self.__data[y, x] corresponds to grid_y[y], grid_x[x]
-            
             try:
-                # If we have full mesh arrays, directly indexing works
-                values = sum_img[grid_y_safe, grid_x_safe]
-                
-                # values is (grid_h, grid_w, channels) e.g. (240, 256, 3)
-                # We need scalar sum per grid point.
-                if len(values.shape) == 3:
-                     # Sum across channels
-                     values = values.sum(axis=2)
-                
-                # Check threshold
                 new_data = values > thresh
-                
-                # Update __data
-                # We can assign directly since we processed the full grid
                 self.__data[:] = new_data
                 self.data_dirty = True
                 self.grid_dirty = True
-                
             except Exception as e:
                 print(f"Vectorized read_data failed: {e}. Falling back to iterative.")
-                # Fallback logic could go here or we re-raise
-                # Let's revert to iterative if this fails to be safe, easier to just copy-paste original loop
-                # Re-using original loop code below for non-full update anyway
-                bit_pairs = self.iter_bitxy() # Reset iterator
-                for bit_xy in bit_pairs:
+                delta = int(self.config.radius // 2)
+                for bit_xy in self.iter_bitxy():
                     img_xy = self.bitxy_to_imgxy(bit_xy)
                     datasub = self.img_target[img_xy.y - delta:img_xy.y + delta,
                                               img_xy.x - delta:img_xy.x + delta]
@@ -970,6 +915,9 @@ class Rompar(object):
         if (0 > bit_x >= self.bit_width) or \
            (0 > bit_y >= self.bit_height):
             raise IndexError("Bit coodrinate (%d, %d) out of range"%bit_xy)
+        mg_x, mg_y = self._calculate_grid_intersections()
+        if mg_x.size > 0:
+            return ImgXY(int(mg_x[bit_y, bit_x]), int(mg_y[bit_y, bit_x]))
         x, y = self._get_intersection(bit_x, bit_y)
         return ImgXY(x, y)
 
